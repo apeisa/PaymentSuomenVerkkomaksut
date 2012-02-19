@@ -56,6 +56,7 @@ class PaymentSuomenVerkkomaksut extends PaymentAbstract implements ConfigurableM
 			$order->setOutputFormatting(false);
 			$order->removeStatus(Page::statusUnpublished);
 			$order->save();
+			$this->session->redirect($this->completedUrl);
 		}
 		
 		$data = $this->modules->getModuleConfigData('PaymentSuomenVerkkomaksut');
@@ -64,17 +65,18 @@ class PaymentSuomenVerkkomaksut extends PaymentAbstract implements ConfigurableM
 	    }
 		
 		
+		$http = ($this->config->https) ? 'https://' : 'http://';
 		
 		// An object is created to model all payment return addresses.
 		$this->urlset = new Verkkomaksut_Module_Rest_Urlset(
-			'http://' . $this->config->httpHost . $this->currentUrl . "success/", // return address for successful payment
-			'http://' . $this->config->httpHost . $this->currentUrl . "failure/", // return address for failed payment
+			$http . $this->config->httpHost . $this->currentUrl . "success/", // return address for successful payment
+			$http . $this->config->httpHost . $this->currentUrl . "failure/", // return address for failed payment
 			
 			// You should create notify page somewhere, which can accept the notify. We are not in the order context
 			// when notify comes, so that is why it cannot be done here in this payment module. We do have processNotify() method
 			// that you can and should use.
-			'http://' . $this->config->httpHost,  // address for payment confirmation from SV server
-			'http://' . $this->config->httpHost . $this->currentUrl . "pending/"  // address for notification on pending payment (NetPosti)
+			$http . $this->config->httpHost,  // address for payment confirmation from SV server
+			$http . $this->config->httpHost . $this->currentUrl . "pending/"  // address for notification on pending payment (NetPosti)
 		);
 		
 		/* Let's see if we have enough information for orderDetails or do we go with price only */
