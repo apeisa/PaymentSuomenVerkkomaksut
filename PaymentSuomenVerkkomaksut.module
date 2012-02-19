@@ -1,0 +1,230 @@
+<?php
+
+/**
+ * Suomen Verkkomaksut Payment method for ProcessWire Shopping Cart
+ *
+ * For documentation about the Suomen Verkkomaksut API visit:
+ * http://docs.verkkomaksut.fi/en/index-all.html#payment-api.rest (English)
+ * http://docs.verkkomaksut.fi/fi/index-all.html#payment-api.rest (Finnish)
+ * 
+ * Copyright (C) 2012 Avoine Oy, Antti Peisa
+ * 
+ * Licensed under GNU/GPL v2
+ *
+ */
+
+require_once(dirname(__FILE__) . '/PaymentAbstract.php');
+
+class PaymentSuomenVerkkomaksut extends PaymentAbstract implements ConfigurableModule { 
+	
+    public static function getModuleInfo()
+	{
+		return array(
+			'title' => 'Suomen Verkkomaksut',
+			'version' => 001,
+			'summary' => 'Uses REST-API and requires CURL',
+			'singular' => false,
+			'autoload' => false
+		);
+	}
+    public function init() {
+		require_once(dirname(__FILE__) . '/Verkkomaksut_Module_Rest.php');
+	}
+	
+    public function processPayment(Page $order) {
+		
+		if ($this->input->urlSegment(2) == "success") {
+			$module = new Verkkomaksut_Module_Rest($this->merchantId, $this->merchantSecret);
+			if($module->confirmPayment($_GET["ORDER_NUMBER"], $_GET["TIMESTAMP"], $_GET["PAID"], $_GET["METHOD"], $_GET["RETURN_AUTHCODE"])) {
+				// Valid notification, confirm payment
+				$order->setOutputFormatting(false);
+				$order->sc_paid = time();
+				$order->removeStatus(Page::statusUnpublished);
+				$order->save();
+			}
+			
+			$this->session->redirect($this->completedUrl);			
+		}
+		
+		if ($this->input->urlSegment(2) == "failure") {
+			$this->session->redirect($this->completedUrl);
+		}
+		
+		
+		if ($this->input->urlSegment(2) == "pending") {
+			// Valid notification, confirm payment but don't mark as paid since it is pending payment
+			$order->setOutputFormatting(false);
+			$order->removeStatus(Page::statusUnpublished);
+			$order->save();
+		}
+		
+		$data = $this->modules->getModuleConfigData('PaymentSuomenVerkkomaksut');
+		foreach($data as $key => $value) {
+		   $this->$key = $value;
+	    }
+		
+		
+		
+		// An object is created to model all payment return addresses.
+		$this->urlset = new Verkkomaksut_Module_Rest_Urlset(
+			'http://' . $this->config->httpHost . $this->currentUrl . "success/", // return address for successful payment
+			'http://' . $this->config->httpHost . $this->currentUrl . "failure/", // return address for failed payment
+			
+			// You should create notify page somewhere, which can accept the notify. We are not in the order context
+			// when notify comes, so that is why it cannot be done here in this payment module. We do have processNotify() method
+			// that you can and should use.
+			'http://' . $this->config->httpHost,  // address for payment confirmation from SV server
+			'http://' . $this->config->httpHost . $this->currentUrl . "pending/"  // address for notification on pending payment (NetPosti)
+		);
+		
+		/* Let's see if we have enough information for orderDetails or do we go with price only */
+		if ($order->sc_firstname && $order->sc_lastname && $order->email && $order->sc_streetaddress && $order->sc_zip && $order->sc_city) {
+			$this->createOrderDetailsOrder($order);
+		} else {
+			$this->createSimpleOrder($order);
+		}
+    }
+	
+	public function createOrderDetailsOrder(Page $order) {
+		// An object is created to model payer’s data
+		$contact = new Verkkomaksut_Module_Rest_Contact(
+			$order->sc_firstname,                             // first name
+			$order->sc_lastname,                           // surname
+			$order->email,      // email address
+			$order->sc_streetaddress,                    // street address
+			$order->sc_zip,                            // postal code
+			$order->sc_city,                         // post office
+			"FI",                               // maa (ISO-3166) TODO: How to handle multiple countries?
+			$order->sc_phone,                        // telephone number
+			"",                                 // mobile phone number
+			""                  // company name
+		);
+		
+		// Payment creation
+		$orderNumber = $order->id;                     // Use distinguished order number
+		$payment = new Verkkomaksut_Module_Rest_Payment_E1($orderNumber, $this->urlset, $contact);
+		
+		foreach($order->children as $p) {
+
+			// Adding one or more product rows to the payment
+			$payment->addProduct(
+				$p->title,                     // product title
+				$p->id,                            // product code
+				$p->sc_qty,                             // product quantity
+				$p->sc_price,                            // product price (/apiece)
+				"23.00",                            // Tax percentage TODO: Implement real product VAT
+				"0.00",                             // Discount percentage
+				Verkkomaksut_Module_Rest_Product::TYPE_NORMAL	// Product type			
+			);
+		}
+		
+		// Sending payment to Suomen Verkkomaksut service and handling possible errors
+		$module = new Verkkomaksut_Module_Rest($this->merchantId, "{$this->merchantSecret}");
+		try {
+			$result = $module->processPayment($payment);
+		}
+		catch(Verkkomaksut_Exception $e) {
+			// processing the error
+			// Error description available $e->getMessage()
+			$errormsg = $e->getMessage();	
+			throw new WireException($errormsg);
+		}
+		
+		$this->renderFormOrRedirect($result);
+
+	}
+	
+	public function createSimpleOrder(Page $order) {
+		$orderNumber = $order->id;                     // Use distinguished order number
+		$price = $order->sc_price;
+		$payment = new Verkkomaksut_Module_Rest_Payment_S1($orderNumber, $this->urlset, $price);
+		
+		$module = new Verkkomaksut_Module_Rest($this->merchantId, "{$this->merchantSecret}");
+		try {
+			$result = $module->processPayment($payment);
+		}
+		catch(Verkkomaksut_Exception $e) {
+			// processing the error
+			// Error description available $e->getMessage()
+			$errormsg = $e->getMessage();	
+			throw new WireException($errormsg);
+		}
+		
+		$this->renderFormOrRedirect($result);
+	}
+	
+	public function processNotify() {
+		// Check if we have all required params
+		if (empty($_GET["ORDER_NUMBER"]) || empty($_GET["TIMESTAMP"]) || empty($_GET["PAID"]) || empty($_GET["METHOD"]) || empty($_GET["RETURN_AUTHCODE"]))
+			return false;
+		
+		// Check if params match
+		$module = new Verkkomaksut_Module_Rest($this->merchantId, $this->merchantSecret);
+		if(!$module->confirmPayment($_GET["ORDER_NUMBER"], $_GET["TIMESTAMP"], $_GET["PAID"], $_GET["METHOD"], $_GET["RETURN_AUTHCODE"]))
+			return false;
+		
+		// All good, save the order information
+		$orderId = (int) $_GET["ORDER_NUMBER"];
+		$order = $this->pages->get($orderId);
+		$order->setOutputFormatting(false);
+		$order->sc_paid = time();
+		$order->removeStatus(Page::statusUnpublished);
+		$order->save();
+		return true;
+	}
+	
+	public function renderFormOrRedirect($result) {
+		$token = $result->getToken();
+		$url = $result->getUrl();
+		
+		if ($this->embeddedForm) {
+			echo "<p id='svmpayment' >";
+			echo "<a href='$url'>Siirry maksamaan</a>";
+			echo "</p>";
+	
+			echo "<script type='text/javascript' src='//payment.verkkomaksut.fi/js/sv-widget.min.js'></script>" .
+				 "<script type='text/javascript'>" .
+				 "var elem = document.getElementById('svmpayment');" .
+				 "var elem_width = parseInt(elem.style.width);" .
+				 "SV.widget.initWithToken('svmpayment', '$token', {width: elem_width});" .
+				 "</script>";
+		} else {
+			$this->session->redirect($url);
+		}
+		
+	}
+	
+	static public function getModuleConfigInputfields(Array $data) {
+		// this is a container for fields, basically like a fieldset
+		$fields = new InputfieldWrapper();
+
+		// since this is a static function, we can't use $this->modules, so get them from the global wire() function
+		$modules = wire('modules');
+
+		
+		if(empty($data['merchantId'])) $data['merchantId'] = '13466';
+		if(empty($data['merchantSecret'])) $data['merchantSecret'] = '6pKF4jkv97zmqBJ3ZL8gUw5DfT2NMQ';
+		
+		$field = $modules->get("InputfieldText");
+		$field->attr('name', 'merchantId');
+		$field->attr('value', $data['merchantId']); 		
+		$field->label = "Merchant ID";
+		$fields->add($field);
+		
+		$field = $modules->get("InputfieldText");
+		$field->attr('name', 'merchantSecret');
+		$field->attr('value', $data['merchantSecret']); 		
+		$field->label = "Merchant Secret";
+		$fields->add($field);
+		
+		
+		$field = $modules->get("InputfieldCheckbox");
+		$field->name = 'embeddedForm';
+		$field->label = "Use embedded SVM form instead of redirect?";
+		$field->value = 1;
+		$field->attr('checked', empty($data['embeddedForm']) ? '' : 'checked');
+		$fields->add($field);
+
+		return $fields;
+	}
+}
