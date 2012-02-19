@@ -1,0 +1,1 @@
+You need Verkkomaksut_Module_Rest.php class which can be downloaded from here: http://docs.verkkomaksut.fi/files/Verkkomaksut_Module_Rest.php.zip
